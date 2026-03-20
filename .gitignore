@@ -1,0 +1,4 @@
+.devcontainer/
+.venv/
+pyvenv.cfg
+pyvev.cfg
