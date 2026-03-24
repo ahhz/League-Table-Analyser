@@ -226,6 +226,3 @@ else:
     
     st.divider()
     st.caption("Note: The model works best when all criteria and overall scores are provided for the majority of institutions.")
-
-else:
-    st.info("Please upload an Excel file and map your columns to begin.")
