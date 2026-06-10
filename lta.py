@@ -3,6 +3,7 @@ import pandas as pd
 import statsmodels.api as sm
 import numpy as np
 import plotly.graph_objects as go
+from io import BytesIO
 
 st.set_page_config(page_title="League Table Analyser", layout="wide")
 
@@ -62,48 +63,124 @@ if uploaded_file:
         new_rank = int(pd.Series(all_scores).rank(ascending=False, method='min').iloc[-1])
         orig_rank_val = int(uni_data[rank_col]) if not pd.isna(uni_data[rank_col]) else None
 
+        def build_single_criterion_figure(target_crit):
+            coeff = model.params[target_crit]
+            is_negative_beta = coeff < 0
+
+            step_range = np.linspace(float(df_cleaned[target_crit].min()), float(df_cleaned[target_crit].max()), 100).tolist()
+            actual_val = float(uni_data[target_crit]) if not pd.isna(uni_data[target_crit]) else step_range[0]
+
+            ranks_mid, ranks_low, ranks_high, crit_ranks = [], [], [], []
+            all_sector_scores = df[overall_col].fillna(0).tolist()
+            c_sector_base = df[target_crit].fillna(df[target_crit].median()).tolist()
+
+            for val in step_range:
+                diff = (val - actual_val)
+                s_mid = orig_score + (coeff * diff)
+                s_low = orig_score + (conf_interval.loc[target_crit, 0] * diff)
+                s_high = orig_score + (conf_interval.loc[target_crit, 1] * diff)
+
+                ranks_mid.append(pd.Series(all_sector_scores + [s_mid]).rank(ascending=False, method='min').iloc[-1])
+                ranks_low.append(pd.Series(all_sector_scores + [s_low]).rank(ascending=False, method='min').iloc[-1])
+                ranks_high.append(pd.Series(all_sector_scores + [s_high]).rank(ascending=False, method='min').iloc[-1])
+                crit_ranks.append(pd.Series(c_sector_base + [val]).rank(ascending=is_negative_beta, method='min').iloc[-1])
+
+            # Actual ranks at the current criterion value for callout annotations
+            actual_overall_rank = orig_rank_val if orig_rank_val else int(pd.Series(all_sector_scores + [orig_score]).rank(ascending=False, method='min').iloc[-1])
+            actual_crit_rank = int(pd.Series(c_sector_base + [actual_val]).rank(ascending=is_negative_beta, method='min').iloc[-1])
+
+            fig_cp = go.Figure()
+            fig_cp.add_trace(go.Scatter(x=step_range + step_range[::-1], y=ranks_high + ranks_low[::-1],
+                                        fill='toself', fillcolor='rgba(99, 110, 250, 0.2)', line=dict(color='rgba(255,255,255,0)'), name='95% CI'))
+            fig_cp.add_trace(go.Scatter(x=step_range, y=crit_ranks, mode='lines', name=f'Rank in {target_crit}', line=dict(color='#00CC96', width=1.5)))
+            fig_cp.add_trace(go.Scatter(x=step_range, y=ranks_mid, mode='lines', name='Projected Overall Rank', line=dict(color='#636EFA', width=3)))
+            fig_cp.add_vline(x=actual_val, line_width=1.5, line_dash="dot", line_color="grey")
+
+            # Callout: actual overall rank
+            fig_cp.add_annotation(
+                x=actual_val, y=actual_overall_rank,
+                text=f"Overall rank: #{actual_overall_rank}",
+                showarrow=True, arrowhead=2, arrowcolor='#636EFA', arrowwidth=1.5,
+                ax=40, ay=-30,
+                font=dict(color='#636EFA', size=11),
+                bgcolor='rgba(255,255,255,0.85)', bordercolor='#636EFA', borderwidth=1
+            )
+            # Callout: actual criterion rank
+            fig_cp.add_annotation(
+                x=actual_val, y=actual_crit_rank,
+                text=f"{target_crit} rank: #{actual_crit_rank}",
+                showarrow=True, arrowhead=2, arrowcolor='#00CC96', arrowwidth=1.5,
+                ax=40, ay=30,
+                font=dict(color='#00CC96', size=11),
+                bgcolor='rgba(255,255,255,0.85)', bordercolor='#00CC96', borderwidth=1
+            )
+
+            # X-axis: left = best-ranking score, right = worst-ranking score
+            x_min = step_range[0]   # df min
+            x_max = step_range[-1]  # df max
+            # Positive beta: higher score → better rank, so best score (max) on left
+            # Negative beta: lower score → better rank, so best score (min) on left
+            x_range = [x_max, x_min] if not is_negative_beta else [x_min, x_max]
+
+            fig_cp.update_layout(
+                xaxis_title=f"{target_crit} Score", yaxis_title="Rank (1 is Top)",
+                xaxis=dict(
+                    range=x_range,
+                    gridcolor='#eeeeee', showline=True, linecolor='#cccccc', linewidth=1,
+                    ticks='outside', tickcolor='#cccccc'
+                ),
+                yaxis=dict(
+                    autorange="reversed", gridcolor='#eeeeee',
+                    showline=True, linecolor='#cccccc', linewidth=1,
+                    ticks='outside', tickcolor='#cccccc'
+                ),
+                plot_bgcolor='white', hovermode="x unified", height=450,
+                margin=dict(l=60, r=20, t=40, b=60)
+            )
+            return fig_cp
+
         st.divider()
 
         # --- SECTION 1: SINGLE CRITERION SENSITIVITY ---
         with st.expander("🔍 Change Single Criterion", expanded=False):
-            _, graph_col1, _ = st.columns([1, 2, 1])
-            with graph_col1:
-                target_crit = st.selectbox("Select Criterion", criteria_cols)
-                coeff = model.params[target_crit]
-                is_negative_beta = coeff < 0
-                
-                step_range = np.linspace(float(df_cleaned[target_crit].min()), float(df_cleaned[target_crit].max()), 100).tolist()
-                actual_val = float(uni_data[target_crit]) if not pd.isna(uni_data[target_crit]) else step_range[0]
-                
-                ranks_mid, ranks_low, ranks_high, crit_ranks = [], [], [], []
-                all_sector_scores = df[overall_col].fillna(0).tolist()
-                c_sector_base = df[target_crit].fillna(df[target_crit].median()).tolist()
+            target_crit = st.selectbox("Select Criterion", criteria_cols)
+            fig_cp = build_single_criterion_figure(target_crit)
+            st.plotly_chart(fig_cp, width='stretch')
 
-                for val in step_range:
-                    diff = (val - actual_val)
-                    s_mid = orig_score + (coeff * diff)
-                    s_low = orig_score + (conf_interval.loc[target_crit, 0] * diff)
-                    s_high = orig_score + (conf_interval.loc[target_crit, 1] * diff)
-                    
-                    ranks_mid.append(pd.Series(all_sector_scores + [s_mid]).rank(ascending=False, method='min').iloc[-1])
-                    ranks_low.append(pd.Series(all_sector_scores + [s_low]).rank(ascending=False, method='min').iloc[-1])
-                    ranks_high.append(pd.Series(all_sector_scores + [s_high]).rank(ascending=False, method='min').iloc[-1])
-                    crit_ranks.append(pd.Series(c_sector_base + [val]).rank(ascending=is_negative_beta, method='min').iloc[-1])
+            st.caption("Export all single-criterion plots into one Word document.")
+            if st.button("🧾 Prepare Word Export (.docx)"):
+                try:
+                    from docx import Document
+                    from docx.shared import Inches
+                except ImportError:
+                    st.error("Word export dependencies are missing. Install with: pip install python-docx kaleido")
+                else:
+                    try:
+                        doc = Document()
+                        doc.add_heading("League Table Analyser - Single Criterion Sensitivity", level=1)
+                        doc.add_paragraph(f"University: {selected_uni}")
 
-                fig_cp = go.Figure()
-                fig_cp.add_trace(go.Scatter(x=step_range + step_range[::-1], y=ranks_high + ranks_low[::-1], 
-                                            fill='toself', fillcolor='rgba(99, 110, 250, 0.2)', line=dict(color='rgba(255,255,255,0)'), name='95% CI'))
-                fig_cp.add_trace(go.Scatter(x=step_range, y=crit_ranks, mode='lines', name=f'Rank in {target_crit}', line=dict(color='#00CC96', width=1.5)))
-                fig_cp.add_trace(go.Scatter(x=step_range, y=ranks_mid, mode='lines', name='Projected Overall Rank', line=dict(color='#636EFA', width=3)))
-                fig_cp.add_vline(x=actual_val, line_width=1.5, line_dash="dot", line_color="grey", annotation_text="Actual")
+                        for crit in criteria_cols:
+                            doc.add_heading(str(crit), level=2)
+                            fig_export = build_single_criterion_figure(crit)
+                            img_bytes = fig_export.to_image(format="png", width=1050, height=600, scale=2)
+                            doc.add_picture(BytesIO(img_bytes), width=Inches(5.1))
 
-                fig_cp.update_layout(
-                    xaxis_title=f"{target_crit} Score", yaxis_title="Rank (1 is Top)",
-                    xaxis=dict(autorange="reversed" if not is_negative_beta else True, gridcolor='whitesmoke'),
-                    yaxis=dict(autorange="reversed", gridcolor='whitesmoke'),
-                    plot_bgcolor='white', hovermode="x unified", height=450
+                        docx_buffer = BytesIO()
+                        doc.save(docx_buffer)
+                        st.session_state["single_criterion_docx"] = docx_buffer.getvalue()
+                        st.success("Word export is ready. Click download below.")
+                    except Exception as exc:
+                        st.error(f"Could not build Word export. Ensure kaleido is installed. Details: {exc}")
+
+            if "single_criterion_docx" in st.session_state:
+                safe_uni = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(selected_uni)).strip("_") or "selected_university"
+                st.download_button(
+                    "⬇️ Download Single Criteria Report (.docx)",
+                    data=st.session_state["single_criterion_docx"],
+                    file_name=f"single_criteria_report_{safe_uni}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                st.plotly_chart(fig_cp, use_container_width=True)
      
         # --- SECTION 2: CONSOLIDATED SIMULATOR HUB ---
         with st.expander("📈 Change Multiple Criteria", expanded=True):
@@ -146,7 +223,7 @@ if uploaded_file:
                     plot_bgcolor='white', height=400, margin=dict(l=0, r=0, t=10, b=0),
                     legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(255,255,255,0.5)")
                 )
-                st.plotly_chart(fig_main, use_container_width=True)
+                st.plotly_chart(fig_main, width='stretch')
 
         # --- SECTION 3: REFERENCE GUIDES ---
         with st.expander("📚 Entry Tariff Reference Guide", expanded=False):
@@ -155,15 +232,15 @@ if uploaded_file:
                 st.write("**UCAS Points per Grade**")
                 st.table(pd.DataFrame({"Grade": ["A*", "A", "B", "C", "D", "E"], "A-Level": [56, 48, 40, 32, 24, 16], "EPQ": [28, 24, 20, 16, 12, 8]}))
                 st.write("**AS Levels & Supplementals**")
-                st.table(pd.DataFrame({"Grade": ["A", "B", "C", "D", "E"], "AS Level": [20, 16, 12, 10, 6], "Music (Gr. 8)": [30, 24, 18, "-", "-"]}))
+                st.table(pd.DataFrame({"Grade": ["A", "B", "C", "D", "E"], "AS Level": ["20", "16", "12", "10", "6"], "Music (Gr. 8)": ["30", "24", "18", "-", "-"]}))
             with col_guide2:
                 st.write("**Common Grade Profile Conversions**")
-                st.table(pd.DataFrame({"Grade Profile": ["A\*A\*A\*", "A\*AA", "AAA", "AAB", "ABB", "BBB", "BBC", "BCC", "CCC"], "Total Points": [168, 152, 144, 136, 128, 120, 112, 104, 96]}))
+                st.table(pd.DataFrame({"Grade Profile": ["A*A*A*", "A*AA", "AAA", "AAB", "ABB", "BBB", "BBC", "BCC", "CCC"], "Total Points": [168, 152, 144, 136, 128, 120, 112, 104, 96]}))
 
         # --- SECTION 4: FULL LEAGUE TABLE DATA ---
         with st.expander("📋 League Table Data", expanded=False):
             display_cols = [name_col, rank_col, overall_col] + criteria_cols
-            st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+            st.dataframe(df[display_cols], width='stretch', hide_index=True)
 
         # --- SECTION 5: STATISTICAL SUMMARY ---
         with st.expander("📊 Regression Statistics", expanded=False):
