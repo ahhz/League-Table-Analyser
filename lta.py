@@ -4,6 +4,9 @@ import statsmodels.api as sm
 import numpy as np
 import plotly.graph_objects as go
 from io import BytesIO
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="League Table Analyser", layout="wide")
 
@@ -139,6 +142,86 @@ if uploaded_file:
             )
             return fig_cp
 
+        def build_single_criterion_image_mpl(target_crit):
+            coeff = model.params[target_crit]
+            is_negative_beta = coeff < 0
+
+            step_range = np.linspace(float(df_cleaned[target_crit].min()), float(df_cleaned[target_crit].max()), 100).tolist()
+            actual_val = float(uni_data[target_crit]) if not pd.isna(uni_data[target_crit]) else step_range[0]
+
+            ranks_mid, ranks_low, ranks_high, crit_ranks = [], [], [], []
+            all_sector_scores = df[overall_col].fillna(0).tolist()
+            c_sector_base = df[target_crit].fillna(df[target_crit].median()).tolist()
+
+            for val in step_range:
+                diff = (val - actual_val)
+                s_mid = orig_score + (coeff * diff)
+                s_low = orig_score + (conf_interval.loc[target_crit, 0] * diff)
+                s_high = orig_score + (conf_interval.loc[target_crit, 1] * diff)
+
+                ranks_mid.append(pd.Series(all_sector_scores + [s_mid]).rank(ascending=False, method='min').iloc[-1])
+                ranks_low.append(pd.Series(all_sector_scores + [s_low]).rank(ascending=False, method='min').iloc[-1])
+                ranks_high.append(pd.Series(all_sector_scores + [s_high]).rank(ascending=False, method='min').iloc[-1])
+                crit_ranks.append(pd.Series(c_sector_base + [val]).rank(ascending=is_negative_beta, method='min').iloc[-1])
+
+            actual_overall_rank = orig_rank_val if orig_rank_val else int(pd.Series(all_sector_scores + [orig_score]).rank(ascending=False, method='min').iloc[-1])
+            actual_crit_rank = int(pd.Series(c_sector_base + [actual_val]).rank(ascending=is_negative_beta, method='min').iloc[-1])
+
+            fig, ax = plt.subplots(figsize=(7.5, 4.2), dpi=200)
+
+            # 95% Confidence Interval band
+            ax.fill_between(step_range, ranks_low, ranks_high, color='#636EFA', alpha=0.2, label='95% CI')
+            # Trend lines
+            ax.plot(step_range, crit_ranks, color='#00CC96', linewidth=1.5, label=f'Rank in {target_crit}')
+            ax.plot(step_range, ranks_mid, color='#636EFA', linewidth=2.5, label='Projected Overall Rank')
+            # Current university marker
+            ax.axvline(x=actual_val, color='grey', linestyle=':', linewidth=1.5)
+
+            # Callout: actual overall rank
+            ax.annotate(
+                f"Overall rank: #{actual_overall_rank}",
+                xy=(actual_val, actual_overall_rank),
+                xytext=(35, -20), textcoords="offset points",
+                arrowprops=dict(arrowstyle="->", color="#636EFA", lw=1.5),
+                fontsize=9, color="#636EFA",
+                bbox=dict(boxstyle="square,pad=0.3", fc="white", ec="#636EFA", alpha=0.9, lw=1)
+            )
+
+            # Callout: actual criterion rank
+            ax.annotate(
+                f"{target_crit} rank: #{actual_crit_rank}",
+                xy=(actual_val, actual_crit_rank),
+                xytext=(35, 20), textcoords="offset points",
+                arrowprops=dict(arrowstyle="->", color="#00CC96", lw=1.5),
+                fontsize=9, color="#00CC96",
+                bbox=dict(boxstyle="square,pad=0.3", fc="white", ec="#00CC96", alpha=0.9, lw=1)
+            )
+
+            # Invert Y axis so rank 1 is top
+            ax.invert_yaxis()
+
+            # X-axis direction matching best vs worst rank
+            if not is_negative_beta:
+                ax.set_xlim(step_range[-1], step_range[0])
+            else:
+                ax.set_xlim(step_range[0], step_range[-1])
+
+            ax.set_xlabel(f"{target_crit} Score", fontsize=10)
+            ax.set_ylabel("Rank (1 is Top)", fontsize=10)
+            ax.set_facecolor('white')
+            ax.grid(True, color='#eeeeee', linewidth=1)
+            for spine in ax.spines.values():
+                spine.set_color('#cccccc')
+
+            ax.legend(loc='upper right', framealpha=0.9, fontsize=9)
+            fig.tight_layout()
+
+            buf = BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+
         st.divider()
 
         # --- SECTION 1: SINGLE CRITERION SENSITIVITY ---
@@ -153,7 +236,7 @@ if uploaded_file:
                     from docx import Document
                     from docx.shared import Inches
                 except ImportError:
-                    st.error("Word export dependencies are missing. Install with: pip install python-docx kaleido")
+                    st.error("Word export dependencies are missing. Install with: pip install python-docx matplotlib")
                 else:
                     try:
                         doc = Document()
@@ -162,8 +245,7 @@ if uploaded_file:
 
                         for crit in criteria_cols:
                             doc.add_heading(str(crit), level=2)
-                            fig_export = build_single_criterion_figure(crit)
-                            img_bytes = fig_export.to_image(format="png", width=1050, height=600, scale=2)
+                            img_bytes = build_single_criterion_image_mpl(crit)
                             doc.add_picture(BytesIO(img_bytes), width=Inches(5.1))
 
                         docx_buffer = BytesIO()
@@ -171,7 +253,7 @@ if uploaded_file:
                         st.session_state["single_criterion_docx"] = docx_buffer.getvalue()
                         st.success("Word export is ready. Click download below.")
                     except Exception as exc:
-                        st.error(f"Could not build Word export. Ensure kaleido is installed. Details: {exc}")
+                        st.error(f"Could not build Word export. Details: {exc}")
 
             if "single_criterion_docx" in st.session_state:
                 safe_uni = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(selected_uni)).strip("_") or "selected_university"
